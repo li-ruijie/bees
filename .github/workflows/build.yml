@@ -11,29 +11,47 @@ on:
     # Check for new releases daily
     - cron: '0 0 * * *'
 
+permissions: {}
+
 jobs:
-  check-release:
+  validate:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.get-tag.outputs.tag }}
-      should-build: ${{ steps.check.outputs.should-build }}
     steps:
-      - name: Get latest tag
+      - name: Get tag
         id: get-tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            TAG="${{ github.event.inputs.tag }}"
           else
             TAG=$(curl -s https://api.github.com/repos/Zygo/bees/tags | jq -r '.[0].name')
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
           fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
+      - name: Validate tag format
+        run: |
+          TAG="${{ steps.get-tag.outputs.tag }}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+([.-][a-z0-9]+)?$ ]]; then
+            echo "Error: Invalid tag format '$TAG'"
+            echo "Expected format: v0.11, v0.11-rc1, v0.11.1, etc."
+            exit 1
+          fi
+          echo "Tag '$TAG' validated"
+
+  check-release:
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ needs.validate.outputs.tag }}
+      should-build: ${{ steps.check.outputs.should-build }}
+    steps:
       - name: Check if release exists
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ steps.get-tag.outputs.tag }}"
+          TAG="${{ needs.validate.outputs.tag }}"
           if gh release view "$TAG" --repo ${{ github.repository }} > /dev/null 2>&1; then
             echo "Release $TAG already exists, skipping build"
             echo "should-build=false" >> $GITHUB_OUTPUT
@@ -45,18 +63,18 @@ jobs:
   build:
     needs: check-release
     if: needs.check-release.outputs.should-build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
         linking: [dynamic, static]
     steps:
-      - name: Set up QEMU
-        if: matrix.arch == 'aarch64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Checkout bees
         run: |
           git clone --depth 1 --branch ${{ needs.check-release.outputs.tag }} \
@@ -64,12 +82,6 @@ jobs:
 
       - name: Build ${{ matrix.linking }} for ${{ matrix.arch }}
         run: |
-          if [ "${{ matrix.arch }}" = "x86_64" ]; then
-            PLATFORM="linux/amd64"
-          else
-            PLATFORM="linux/arm64"
-          fi
-
           if [ "${{ matrix.linking }}" = "static" ]; then
             LDFLAGS_EXTRA="-static"
             STRIP_OPTS="--strip-all"
@@ -78,7 +90,7 @@ jobs:
             STRIP_OPTS=""
           fi
 
-          docker run --rm --platform $PLATFORM \
+          docker run --rm --platform ${{ matrix.platform }} \
             -v $PWD/bees:/src \
             -v $PWD/output:/output \
             -w /src \
@@ -152,14 +164,14 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}
           path: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}.tar.gz
 
       - name: Upload library info
         if: matrix.linking == 'dynamic'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries
           path: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries.txt
@@ -171,7 +183,7 @@ jobs:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
@@ -216,12 +228,6 @@ jobs:
 
           **Static builds**: No runtime dependencies, larger binary size.
           **Dynamic builds**: Smaller binary, requires compatible system libraries. See `*-dynamic-linked-libraries.txt` for versions.
-
-          ## Installation
-          ```bash
-          tar -xzf bees-$TAG-<arch>-<linking>.tar.gz
-          sudo install -m 755 bees /usr/local/bin/
-          ```
 
           NOTES_END
 
