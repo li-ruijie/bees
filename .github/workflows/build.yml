@@ -1,0 +1,242 @@
+name: Build bees
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g., v0.11)'
+        required: true
+        default: 'v0.11'
+  schedule:
+    # Check for new releases daily
+    - cron: '0 0 * * *'
+
+jobs:
+  check-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.get-tag.outputs.tag }}
+      should-build: ${{ steps.check.outputs.should-build }}
+    steps:
+      - name: Get latest tag
+        id: get-tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            TAG=$(curl -s https://api.github.com/repos/Zygo/bees/tags | jq -r '.[0].name')
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if release exists
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.get-tag.outputs.tag }}"
+          if gh release view "$TAG" --repo ${{ github.repository }} > /dev/null 2>&1; then
+            echo "Release $TAG already exists, skipping build"
+            echo "should-build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Release $TAG does not exist, will build"
+            echo "should-build=true" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check-release
+    if: needs.check-release.outputs.should-build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+        linking: [dynamic, static]
+    steps:
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Checkout bees
+        run: |
+          git clone --depth 1 --branch ${{ needs.check-release.outputs.tag }} \
+            https://github.com/Zygo/bees.git bees
+
+      - name: Build ${{ matrix.linking }} for ${{ matrix.arch }}
+        run: |
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            PLATFORM="linux/amd64"
+          else
+            PLATFORM="linux/arm64"
+          fi
+
+          if [ "${{ matrix.linking }}" = "static" ]; then
+            LDFLAGS_EXTRA="-static"
+            STRIP_OPTS="--strip-all"
+          else
+            LDFLAGS_EXTRA=""
+            STRIP_OPTS=""
+          fi
+
+          docker run --rm --platform $PLATFORM \
+            -v $PWD/bees:/src \
+            -v $PWD/output:/output \
+            -w /src \
+            -e LDFLAGS_EXTRA="$LDFLAGS_EXTRA" \
+            debian:bookworm bash -c '
+              set -e
+              apt-get update
+              apt-get install -y build-essential btrfs-progs libbtrfs-dev markdown file git pkg-config
+              git config --global --add safe.directory /src
+
+              # For static builds, install static libraries
+              if [ -n "$LDFLAGS_EXTRA" ]; then
+                apt-get install -y libblkid-dev uuid-dev zlib1g-dev liblzo2-dev libzstd-dev
+              fi
+
+              make clean
+              make -j$(nproc) LDFLAGS="$LDFLAGS_EXTRA"
+              strip '"$STRIP_OPTS"' bin/bees
+
+              cp bin/bees /output/bees
+              file /output/bees > /output/file-info.txt
+
+              # For dynamic builds, capture library dependencies with versions
+              if [ -z "$LDFLAGS_EXTRA" ]; then
+                {
+                  echo "Build Environment"
+                  echo "================="
+                  echo "Distribution: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d \")"
+                  echo "Kernel: $(uname -r)"
+                  echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  echo ""
+
+                  echo "Linked Libraries"
+                  echo "================"
+                  ldd bin/bees 2>&1
+                  echo ""
+
+                  echo "Library Package Versions"
+                  echo "========================"
+                  # Get package that provides each linked library
+                  for lib in $(ldd bin/bees 2>/dev/null | grep -oP "/[^ ]+" | sort -u); do
+                    pkg=$(dpkg -S "$lib" 2>/dev/null | cut -d: -f1 || echo "unknown")
+                    ver=$(dpkg-query -W -f='"${Version}"' "$pkg" 2>/dev/null || echo "unknown")
+                    echo "$pkg $ver -> $lib"
+                  done
+                  echo ""
+
+                  echo "Key Runtime Dependencies"
+                  echo "========================"
+                  dpkg-query -W -f='"${Package} ${Version}\n"' \
+                    libc6 libstdc++6 libbtrfs0 libgcc-s1 zlib1g libzstd1 liblzo2-2 \
+                    2>/dev/null | sort || true
+                } > /output/LIBRARIES.txt
+              fi
+            '
+
+      - name: Package binary
+        run: |
+          TAG="${{ needs.check-release.outputs.tag }}"
+          ARCH="${{ matrix.arch }}"
+          LINKING="${{ matrix.linking }}"
+          mkdir -p dist
+          cp output/bees dist/bees
+          cp bees/scripts/beesd dist/
+          cp bees/scripts/beesd@.service dist/
+          tar -czvf bees-${TAG}-${ARCH}-${LINKING}.tar.gz -C dist .
+
+          # Copy library info file for release
+          if [ "$LINKING" = "dynamic" ]; then
+            cp output/LIBRARIES.txt bees-${TAG}-${ARCH}-dynamic-linked-libraries.txt
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}
+          path: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}.tar.gz
+
+      - name: Upload library info
+        if: matrix.linking == 'dynamic'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries
+          path: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries.txt
+
+  release:
+    needs: [check-release, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release notes
+        run: |
+          TAG="${{ needs.check-release.outputs.tag }}"
+
+          # Collect library info for release notes
+          echo "## Library Dependencies (Dynamic Builds)" > lib-notes.md
+          echo "" >> lib-notes.md
+          for arch in x86_64 aarch64; do
+            LIBFILE="artifacts/bees-${TAG}-${arch}-dynamic-linked-libraries/bees-${TAG}-${arch}-dynamic-linked-libraries.txt"
+            if [ -f "$LIBFILE" ]; then
+              echo "### ${arch}" >> lib-notes.md
+              echo '```' >> lib-notes.md
+              cat "$LIBFILE" >> lib-notes.md
+              echo '```' >> lib-notes.md
+              echo "" >> lib-notes.md
+            fi
+          done
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ needs.check-release.outputs.tag }}"
+
+          # Collect all tarballs and library info files
+          find artifacts -name '*.tar.gz' -exec mv {} . \;
+          find artifacts -name '*-dynamic-linked-libraries.txt' -exec mv {} . \;
+
+          # Build release notes
+          cat > notes.md << 'NOTES_END'
+          Automated build of [Zygo/bees](https://github.com/Zygo/bees) $TAG
+
+          ## Downloads
+
+          | Architecture | Static | Dynamic |
+          |--------------|--------|---------|
+          | x86_64 (amd64) | `bees-$TAG-x86_64-static.tar.gz` | `bees-$TAG-x86_64-dynamic.tar.gz` |
+          | aarch64 (arm64) | `bees-$TAG-aarch64-static.tar.gz` | `bees-$TAG-aarch64-dynamic.tar.gz` |
+
+          **Static builds**: No runtime dependencies, larger binary size.
+          **Dynamic builds**: Smaller binary, requires compatible system libraries. See `*-dynamic-linked-libraries.txt` for versions.
+
+          ## Installation
+          ```bash
+          tar -xzf bees-$TAG-<arch>-<linking>.tar.gz
+          sudo install -m 755 bees /usr/local/bin/
+          ```
+
+          NOTES_END
+
+          # Substitute TAG in notes
+          sed -i "s/\$TAG/${TAG}/g" notes.md
+
+          # Append library info
+          cat lib-notes.md >> notes.md
+
+          echo "" >> notes.md
+          echo "See [upstream documentation](https://github.com/Zygo/bees/tree/${TAG}/docs) for usage." >> notes.md
+
+          # Create release
+          gh release create "$TAG" \
+            --repo ${{ github.repository }} \
+            --title "bees $TAG" \
+            --notes-file notes.md \
+            *.tar.gz *-dynamic-linked-libraries.txt
