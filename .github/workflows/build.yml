@@ -155,7 +155,7 @@ jobs:
               fi
 
               # Build .deb package
-              make install DESTDIR=/pkg PREFIX=/usr
+              make install DESTDIR=/pkg PREFIX=/usr SYSTEMD_SYSTEM_UNIT_DIR=/usr/lib/systemd/system
 
               DEB_ARCH=$(dpkg --print-architecture)
               VERSION=$(echo "$TAG" | sed "s/^v//")
