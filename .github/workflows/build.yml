@@ -91,6 +91,8 @@ jobs:
 
       - name: Build ${{ matrix.linking }} for ${{ matrix.arch }}
         run: |
+          TAG="${{ needs.check-release.outputs.tag }}"
+
           if [ "${{ matrix.linking }}" = "static" ]; then
             LDFLAGS_EXTRA="-static"
             STRIP_OPTS="--strip-all"
@@ -104,6 +106,7 @@ jobs:
             -v $PWD/output:/output \
             -w /src \
             -e LDFLAGS_EXTRA="$LDFLAGS_EXTRA" \
+            -e TAG="$TAG" \
             debian:bookworm bash -c '
               set -e
               apt-get update
@@ -150,6 +153,49 @@ jobs:
                   done
                 } > /output/LIBRARIES.txt
               fi
+
+              # Build .deb package
+              make install DESTDIR=/pkg PREFIX=/usr
+
+              DEB_ARCH=$(dpkg --print-architecture)
+              VERSION=$(echo "$TAG" | sed "s/^v//")
+
+              if [ -n "$LDFLAGS_EXTRA" ]; then
+                PKG_NAME="bees-static"
+                DEP_LINE=""
+                CONFLICT_PKG="bees"
+              else
+                PKG_NAME="bees"
+                CONFLICT_PKG="bees-static"
+                # Derive runtime dependencies from linked libraries
+                DEP_LIST=$(ldd /pkg/usr/lib/bees/bees 2>/dev/null \
+                  | grep -oE "/[^ ]+" \
+                  | sort -u \
+                  | while read -r lib; do
+                      pkg=$(dpkg -S "$lib" 2>/dev/null | head -1 | sed "s/:.*//")
+                      if [ -n "$pkg" ]; then
+                        ver=$(dpkg-query -W -f "\${Version}" "$pkg" 2>/dev/null)
+                        echo "${pkg} (>= ${ver})"
+                      fi
+                    done \
+                  | sort -u \
+                  | paste -sd ", ")
+                DEP_LINE="Depends: ${DEP_LIST}"
+              fi
+
+              mkdir -p /pkg/DEBIAN
+              {
+                echo "Package: ${PKG_NAME}"
+                echo "Version: ${VERSION}"
+                echo "Architecture: ${DEB_ARCH}"
+                echo "Maintainer: bees build <noreply@github.com>"
+                echo "Description: Best-Effort Extent-Same, a btrfs dedup agent"
+                [ -n "$DEP_LINE" ] && echo "$DEP_LINE"
+                echo "Conflicts: ${CONFLICT_PKG}"
+                echo "Replaces: ${CONFLICT_PKG}"
+              } > /pkg/DEBIAN/control
+
+              dpkg-deb --build /pkg "/output/${PKG_NAME}_${VERSION}_${DEB_ARCH}.deb"
             '
 
       - name: Package binary
@@ -168,6 +214,9 @@ jobs:
             cp output/LIBRARIES.txt bees-${TAG}-${ARCH}-dynamic-linked-libraries.txt
           fi
 
+          # Copy .deb package
+          cp output/*.deb .
+
       - name: Upload artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -180,6 +229,12 @@ jobs:
         with:
           name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries
           path: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries.txt
+
+      - name: Upload deb package
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}-deb
+          path: '*.deb'
 
   release:
     needs: [check-release, build]
@@ -216,8 +271,9 @@ jobs:
         run: |
           TAG="${{ needs.check-release.outputs.tag }}"
 
-          # Collect all tarballs and library info files
+          # Collect all release files
           find artifacts -name '*.tar.gz' -exec mv {} . \;
+          find artifacts -name '*.deb' -exec mv {} . \;
           find artifacts -name '*-dynamic-linked-libraries.txt' -exec mv {} . \;
 
           # Build release notes
@@ -226,18 +282,31 @@ jobs:
 
           ## Downloads
 
+          ### Tarballs
+
           | Architecture | Static | Dynamic |
           |--------------|--------|---------|
           | x86_64 (amd64) | `bees-$TAG-x86_64-static.tar.gz` | `bees-$TAG-x86_64-dynamic.tar.gz` |
           | aarch64 (arm64) | `bees-$TAG-aarch64-static.tar.gz` | `bees-$TAG-aarch64-dynamic.tar.gz` |
+
+          ### Debian Packages
+
+          | Architecture | Static | Dynamic |
+          |--------------|--------|---------|
+          | amd64 | `bees-static_$VER_amd64.deb` | `bees_$VER_amd64.deb` |
+          | arm64 | `bees-static_$VER_arm64.deb` | `bees_$VER_arm64.deb` |
+
+          Install with `sudo dpkg -i <file>.deb`. The `bees` and `bees-static` packages conflict, so only one can be installed at a time.
 
           **Static builds**: No runtime dependencies, larger binary size.
           **Dynamic builds**: Smaller binary, requires compatible system libraries. See `*-dynamic-linked-libraries.txt` for versions.
 
           NOTES_END
 
-          # Substitute TAG in notes
+          # Substitute TAG and VER in notes
+          VER="${TAG#v}"
           sed -i "s/\$TAG/${TAG}/g" notes.md
+          sed -i "s/\$VER/${VER}/g" notes.md
 
           # Append library info
           cat lib-notes.md >> notes.md
@@ -250,4 +319,4 @@ jobs:
             --repo ${{ github.repository }} \
             --title "bees $TAG" \
             --notes-file notes.md \
-            *.tar.gz *-dynamic-linked-libraries.txt
+            *.tar.gz *.deb *-dynamic-linked-libraries.txt
