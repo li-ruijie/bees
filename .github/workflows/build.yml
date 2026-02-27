@@ -218,20 +218,20 @@ jobs:
           cp output/*.deb .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}
           path: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}.tar.gz
 
       - name: Upload library info
         if: matrix.linking == 'dynamic'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries
           path: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries.txt
 
       - name: Upload deb package
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}-deb
           path: '*.deb'
