@@ -222,6 +222,7 @@ jobs:
         with:
           name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}
           path: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}.tar.gz
+          retention-days: 1
 
       - name: Upload library info
         if: matrix.linking == 'dynamic'
@@ -229,12 +230,14 @@ jobs:
         with:
           name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries
           path: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-dynamic-linked-libraries.txt
+          retention-days: 1
 
       - name: Upload deb package
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: bees-${{ needs.check-release.outputs.tag }}-${{ matrix.arch }}-${{ matrix.linking }}-deb
           path: '*.deb'
+          retention-days: 1
 
   release:
     needs: [check-release, build]
