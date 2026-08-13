@@ -33,4 +33,4 @@ Pre-built binaries are available in [Releases](../../releases).
 
 ## License
 
-GPL-3.0 (same as upstream)
+AGPL-3.0
